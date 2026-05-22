@@ -45,5 +45,5 @@ https://github.com/neilkumaran/flashburn
 
 Compile:
 ```bash
-javac Main.java
+javac *.java
 java Main
