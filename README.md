@@ -1,4 +1,6 @@
-# FlashFetch
+# FlashFetchGUI
+
+FlashFetchGUI is the GUI version of FlashFetch built with the Swing Java Framework.
 
 FlashFetch is a cross-platform, command-line utility written in Java that simplifies downloading operating system ISO images. It is designed as a companion tool to **FlashBurn**, providing a streamlined workflow from OS discovery to bootable USB creation.
 
