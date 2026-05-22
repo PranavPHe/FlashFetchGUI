@@ -7,6 +7,7 @@ import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.io.*;
 import java.net.*;
+import java.awt.GraphicsEnvironment;
 
 /**
  * FlashFetch - A command-line tool for downloading operating system ISO files
@@ -74,14 +75,29 @@ public class Main {
      * Loads settings, ensures download directory exists, and displays main menu loop
      */
     public static void main(String[] args) {
+        if (args != null) {
+            for (String arg : args) {
+                if ("--cli".equalsIgnoreCase(arg)) { runCli(); return; }
+                if ("--ui".equalsIgnoreCase(arg)) { launchUi(); return; }
+            }
+        }
+
+        if (GraphicsEnvironment.isHeadless()) {
+            runCli();
+        } else {
+            launchUi();
+        }
+    }
+
+    private static void runCli() {
         loadSettings();              // Load saved configuration
         ensureDownloadDirectory();   // Create download directory if needed
-        
+
         // Main application loop
         while (true) {
             displayMainMenu();
             int choice = getUserChoice();
-            
+
             // Route user to appropriate menu based on selection
             switch (choice) {
                 case 1: osMenu("windows", "WINDOWS", OSDatabase.getWindowsMenu()); break;
@@ -97,10 +113,15 @@ public class Main {
                     System.out.println("\nGo get FlashBurn!!! Written in C++ instead of Java!");
                     scanner.close();
                     return;
-                default: 
+                default:
                     System.out.println("\nInvalid option.");
             }
         }
+    }
+
+    private static void launchUi() {
+        initForUi();
+        javax.swing.SwingUtilities.invokeLater(() -> new FlashFetchUI().show());
     }
 
     /**
@@ -310,39 +331,130 @@ public class Main {
             if (choice == 3) return;
             if (choice == 1) targetFile.delete();  // Delete for fresh download
         }
+
+        boolean resume = targetFile.exists() && targetFile.length() > 0;
+        DownloadTask task = startDownloadTask(name, url, filePath, expectedChecksum, resume, !resume);
         
-        // Create download task and add to queue
+        // Display confirmation message
+        System.out.println("\n  ╔════════════════════════════════════════════════════════╗");
+        System.out.println("  ║              ✓ DOWNLOAD STARTED                        ║");
+        System.out.println("  ╚════════════════════════════════════════════════════════╝");
+        System.out.println("\n  File: " + name);
+        System.out.println("  Saving to: " + filePath);
+        System.out.println("\n  Go to [6] View Downloads to see progress.");
+        pause();
+    }
+
+    public static void initForUi() {
+        loadSettings();
+        ensureDownloadDirectory();
+    }
+
+    public static String getDownloadDirectory() { return downloadDirectory; }
+    public static int getConcurrentDownloads() { return concurrentDownloads; }
+    public static int getDownloadTimeout() { return downloadTimeout; }
+    public static boolean isAutoRetry() { return autoRetry; }
+    public static int getMaxRetries() { return maxRetries; }
+    public static boolean isChecksumVerification() { return checksumVerification; }
+
+    public static void setDownloadDirectory(String dir) {
+        if (dir == null || dir.trim().isEmpty()) return;
+        downloadDirectory = dir.trim();
+        ensureDownloadDirectory();
+        saveSettings();
+    }
+
+    public static void setConcurrentDownloads(int value) {
+        if (value < 1 || value > 5) return;
+        concurrentDownloads = value;
+        saveSettings();
+    }
+
+    public static void setDownloadTimeout(int valueMs) {
+        if (valueMs < 10000 || valueMs > 120000) return;
+        downloadTimeout = valueMs;
+        saveSettings();
+    }
+
+    public static void setAutoRetry(boolean value) { autoRetry = value; saveSettings(); }
+    public static void setMaxRetries(int value) { if (value >= 0 && value <= 10) { maxRetries = value; saveSettings(); } }
+    public static void setChecksumVerification(boolean value) { checksumVerification = value; saveSettings(); }
+
+    public static List<DownloadTask> getDownloadQueue() { return downloadQueue; }
+    public static List<DownloadTask> getCompletedDownloads() { return completedDownloads; }
+
+    public static DownloadTask startDownloadTask(String name, String url, String filePath, String expectedChecksum,
+                                                 boolean resume, boolean overwrite) {
+        File targetFile = new File(filePath);
+        if (targetFile.exists() && overwrite) targetFile.delete();
+
         DownloadTask task = new DownloadTask(name, url, filePath);
         task.checksum = expectedChecksum;
         downloadQueue.add(task);
-        
-        // Create download thread
+        startDownloadThread(task, resume);
+        return task;
+    }
+
+    public static void pauseDownload(DownloadTask task) {
+        if (task == null) return;
+        if ("downloading".equals(task.status)) task.status = "paused";
+    }
+
+    public static void resumeDownload(DownloadTask task) {
+        if (task == null) return;
+        if (!"paused".equals(task.status) && !"failed".equals(task.status)) return;
+        if (task.downloadThread != null && task.downloadThread.isAlive()) return;
+        startDownloadThread(task, true);
+    }
+
+    public static void cancelDownload(DownloadTask task, boolean deletePartial) {
+        if (task == null) return;
+        task.status = "canceled";
+        if (task.downloadThread != null) task.downloadThread.interrupt();
+        downloadQueue.remove(task);
+        if (deletePartial) {
+            try { new File(task.filePath).delete(); } catch (Exception e) { /* ignore */ }
+        }
+    }
+
+    public static void openDownloadFolder() {
+        try {
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win")) new ProcessBuilder("explorer.exe", downloadDirectory).start();
+            else if (os.contains("mac")) new ProcessBuilder("open", downloadDirectory).start();
+            else new ProcessBuilder("xdg-open", downloadDirectory).start();
+        } catch (IOException e) { /* ignore */ }
+    }
+
+    public static String formatSizeUi(long b) { return formatSize(b); }
+
+    private static void startDownloadThread(DownloadTask task, boolean resume) {
         Thread downloadThread = new Thread(() -> {
             task.status = "downloading";
             HttpURLConnection conn = null;
-            
+
             try {
                 // Establish HTTP connection with timeout
-                URL downloadUrl = new URL(url);
+                URL downloadUrl = java.net.URI.create(task.url).toURL();
                 conn = (HttpURLConnection) downloadUrl.openConnection();
                 conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
                 conn.setConnectTimeout(downloadTimeout);
                 conn.setReadTimeout(downloadTimeout);
-                
+
                 // Follow HTTP redirects manually
                 int responseCode = conn.getResponseCode();
                 while (responseCode == 301 || responseCode == 302 || responseCode == 303) {
                     String newUrl = conn.getHeaderField("Location");
                     conn.disconnect();
-                    conn = (HttpURLConnection) new URL(newUrl).openConnection();
+                    conn = (HttpURLConnection) java.net.URI.create(newUrl).toURL().openConnection();
                     conn.setRequestProperty("User-Agent", "Mozilla/5.0");
                     responseCode = conn.getResponseCode();
                 }
-                
+
                 // Check for existing partial download for resume capability
-                File existingFile = new File(filePath);
-                long existingSize = existingFile.exists() ? existingFile.length() : 0;
-                
+                File existingFile = new File(task.filePath);
+                long existingSize = resume && existingFile.exists() ? existingFile.length() : 0;
+
                 // Request resume from existing byte position
                 if (existingSize > 0) {
                     conn.disconnect();
@@ -351,29 +463,34 @@ public class Main {
                     conn.setRequestProperty("Range", "bytes=" + existingSize + "-");
                     responseCode = conn.getResponseCode();
                 }
-                
+
                 // Set total size and adjust for resumed downloads
                 task.totalSize = conn.getContentLengthLong();
                 if (existingSize > 0 && responseCode == 206) {  // 206 = Partial Content
                     task.totalSize += existingSize;
                     task.downloadedSize = existingSize;
+                } else if (existingSize == 0) {
+                    task.downloadedSize = 0;
                 }
-                
+
                 // Download file in chunks
                 try (InputStream in = conn.getInputStream();
-                     RandomAccessFile out = new RandomAccessFile(filePath, "rw")) {
-                    
+                     RandomAccessFile out = new RandomAccessFile(task.filePath, "rw")) {
+
                     if (existingSize > 0 && responseCode == 206) out.seek(existingSize);
-                    
+
                     byte[] buffer = new byte[8192];  // 8KB buffer
                     int bytesRead;
                     while ((bytesRead = in.read(buffer)) != -1) {
-                        if (task.status.equals("paused")) break;  // Allow pausing
+                        if (Thread.currentThread().isInterrupted()) break;
+                        if (task.status.equals("paused") || task.status.equals("canceled")) break;
                         out.write(buffer, 0, bytesRead);
                         task.downloadedSize += bytesRead;
                     }
                 }
-                
+
+                if (task.status.equals("canceled") || task.status.equals("paused")) return;
+
                 // Mark as completed if download finished
                 if (task.downloadedSize >= task.totalSize || task.totalSize == -1) {
                     task.status = "completed";
@@ -386,18 +503,9 @@ public class Main {
                 if (conn != null) conn.disconnect();
             }
         });
-        
+
         task.downloadThread = downloadThread;
         downloadThread.start();
-        
-        // Display confirmation message
-        System.out.println("\n  ╔════════════════════════════════════════════════════════╗");
-        System.out.println("  ║              ✓ DOWNLOAD STARTED                        ║");
-        System.out.println("  ╚════════════════════════════════════════════════════════╝");
-        System.out.println("\n  File: " + name);
-        System.out.println("  Saving to: " + filePath);
-        System.out.println("\n  Go to [6] View Downloads to see progress.");
-        pause();
     }
 
     /**
@@ -453,9 +561,9 @@ public class Main {
                 // Open download folder in OS file manager
                 try {
                     String os = System.getProperty("os.name").toLowerCase();
-                    if (os.contains("win")) Runtime.getRuntime().exec("explorer.exe \"" + downloadDirectory + "\"");
-                    else if (os.contains("mac")) Runtime.getRuntime().exec("open " + downloadDirectory);
-                    else Runtime.getRuntime().exec("xdg-open " + downloadDirectory);
+                    if (os.contains("win")) new ProcessBuilder("explorer.exe", downloadDirectory).start();
+                    else if (os.contains("mac")) new ProcessBuilder("open", downloadDirectory).start();
+                    else new ProcessBuilder("xdg-open", downloadDirectory).start();
                 } catch (IOException e) { System.out.println("Could not open folder."); pause(); }
             }
         }
@@ -697,7 +805,7 @@ public class Main {
         if (!source.exists()) {
             System.out.println("  Downloading...");
             try {
-                HttpURLConnection conn = (HttpURLConnection) new URL(FLASHBURN_URL).openConnection();
+                HttpURLConnection conn = (HttpURLConnection) java.net.URI.create(FLASHBURN_URL).toURL().openConnection();
                 if (conn.getResponseCode() != 200) { System.out.println("Download failed."); return false; }
                 try (InputStream in = conn.getInputStream(); FileOutputStream out = new FileOutputStream(source)) {
                     byte[] buf = new byte[8192];
